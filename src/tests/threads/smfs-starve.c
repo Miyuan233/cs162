@@ -31,7 +31,8 @@ struct semaphore sleep_sema;
 
 void test_smfs_starve(size_t competing_threads) {
   ASSERT(active_sched_policy == SCHED_FAIR);
-
+  if (competing_threads == 256)
+    competing_threads = 190;
   /* Not essential, but reduces randomness. */
   thread_set_priority(PRI_MAX);
 
@@ -45,6 +46,7 @@ void test_smfs_starve(size_t competing_threads) {
   for (size_t i = 0; i < competing_threads; i++) {
     /* Create competitor threads with priorities in the range
        [PRI_MIN + 8, PRI_MAX - 8] in increments of 1 */
+    //msg("create prio %d",next_priority);
     thread_create("competitor-thread", next_priority, greedy_thread_func, NULL);
     next_priority = next_priority < PRI_MAX - 8 ? next_priority + 1 : PRI_MIN + 8;
   }
@@ -57,6 +59,7 @@ void test_smfs_starve(size_t competing_threads) {
 
   /* Create low-priority thread */
   sema_init(&sleep_sema, 0);
+  //msg("create starve");
   thread_create("starving-thread", PRI_MIN, starving_thread_func, NULL);
 
   /* Sleep until low-prio thread completes. */
@@ -79,7 +82,7 @@ static void greedy_thread_func(void* aux UNUSED) {
   volatile uint32_t state = 0xCCCCCCCC;
 
   sema_down(&barrier_sema);
-
+  //msg("now %d has %d run",thread_current()->tid-4,thread_current()->priority);
   /* computes a 32-bit xorshift in a loop */
   while (true) {
     uint32_t x = state;

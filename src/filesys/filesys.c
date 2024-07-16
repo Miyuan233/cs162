@@ -11,7 +11,7 @@
 struct block* fs_device;
 
 static void do_format(void);
-
+struct lock filesys_lock;
 /* Initializes the file system module.
    If FORMAT is true, reformats the file system. */
 void filesys_init(bool format) {
@@ -24,7 +24,7 @@ void filesys_init(bool format) {
 
   if (format)
     do_format();
-
+  lock_init(&filesys_lock);
   free_map_open();
 }
 

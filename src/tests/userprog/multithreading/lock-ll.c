@@ -57,6 +57,7 @@ void thread_function(void* arg_) {
     new_node->val = i + 1;
     new_node->rest = NULL;
     tail->rest = new_node;
+    //printf("thread%d  insert%d\n",thread_data->thread_num,i+1);
     lock_release(thread_data->ll_lock);
   }
 }

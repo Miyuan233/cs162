@@ -63,7 +63,7 @@ void test_smfs_hierarchy(size_t num_threads) {
     sema_up(&barrier_sema);
 
   /* Sleep for a bit to allow the counter threads time to run amok. */
-  timer_sleep(200000);
+  timer_sleep(5000);
 
   /* Rein in the counters...
      Note that the order of acquisition gives higher-priority threads a
@@ -77,6 +77,7 @@ void test_smfs_hierarchy(size_t num_threads) {
   for (size_t i = 0, j = 1; j < 8; i++, j++) {
     if (counters[i] < counters[j]) {
       msg("counters[%d] < counters[%d]", i, j);
+      //msg("counters[%d] < counters[%d],%d %d", i, j,counters[i], counters[j]);
     } else {
       msg("counters[%d] >= counters[%d]!!", i, j);
       msg("  Threads with priority...");

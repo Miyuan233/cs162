@@ -4,10 +4,31 @@
 #include <list.h>
 #include <stdbool.h>
 
+struct priority_queue {
+  struct thread* init_q[9];
+  struct thread** prio_q;
+  int capacity;
+  int size;
+  int tickets;
+  int (*compare)(const void*, const void*);
+};
+
+int prio_q_init(struct priority_queue*, int (*compare)(const void*, const void*));
+int parent(int i);
+int left(int i);
+int right(int i);
+void swap(struct priority_queue* h, int i, int j);
+void heapify(struct priority_queue*, int index);
+struct thread* pop_heap(struct priority_queue*);
+void heap_up(struct priority_queue*, int index);
+void heap_down(struct priority_queue*, int index);
+void heap_insert(struct priority_queue*, struct thread*);
+void heap_resize(struct priority_queue*);
+int max_prio_compare(const void* a, const void* b);
 /* A counting semaphore. */
-struct semaphore {
-  unsigned value;      /* Current value. */
-  struct list waiters; /* List of waiting threads. */
+typedef struct semaphore {
+  unsigned value;             /* Current value. */
+  struct priority_queue heap; /* List of waiting threads. */
 };
 
 void sema_init(struct semaphore*, unsigned value);
@@ -17,7 +38,7 @@ void sema_up(struct semaphore*);
 void sema_self_test(void);
 
 /* Lock. */
-struct lock {
+typedef struct lock {
   struct thread* holder;      /* Thread holding lock (for debugging). */
   struct semaphore semaphore; /* Binary semaphore controlling access. */
 };
@@ -30,7 +51,7 @@ bool lock_held_by_current_thread(const struct lock*);
 
 /* Condition variable. */
 struct condition {
-  struct list waiters; /* List of waiting threads. */
+  struct priority_queue cheap; /* List of waiting threads. */
 };
 
 void cond_init(struct condition*);

@@ -121,6 +121,11 @@ static void page_fault(struct intr_frame* f) {
      See [IA32-v2a] "MOV--Move to/from Control Registers" and
      [IA32-v3a] 5.15 "Interrupt 14--Page Fault Exception
      (#PF)". */
+
+  if (user || (!user)) {
+    exit(-1);
+  }
+
   asm("movl %%cr2, %0" : "=r"(fault_addr));
 
   /* Turn interrupts back on (they were only off so that we could

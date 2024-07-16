@@ -31,6 +31,8 @@
 #include <string.h>
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/malloc.h"
+#include "threads/palloc.h"
 
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
@@ -45,7 +47,7 @@ void sema_init(struct semaphore* sema, unsigned value) {
   ASSERT(sema != NULL);
 
   sema->value = value;
-  list_init(&sema->waiters);
+  prio_q_init(&sema->heap, max_prio_compare);
 }
 
 /* Down or "P" operation on a semaphore.  Waits for SEMA's value
@@ -63,11 +65,15 @@ void sema_down(struct semaphore* sema) {
 
   old_level = intr_disable();
   while (sema->value == 0) {
-    list_push_back(&sema->waiters, &thread_current()->elem);
+    heap_insert(&sema->heap, thread_current());
+    //thread_current()->h=sema->heap;
     thread_block();
   }
+
   sema->value--;
+  //thread_current()->h=NULL;
   intr_set_level(old_level);
+  //printf("i wake up\n");
 }
 
 /* Down or "P" operation on a semaphore, but only if the
@@ -97,14 +103,27 @@ bool sema_try_down(struct semaphore* sema) {
 
    This function may be called from an interrupt handler. */
 void sema_up(struct semaphore* sema) {
+  struct thread* t = thread_current();
   enum intr_level old_level;
 
   ASSERT(sema != NULL);
-
+  struct thread* thread1 = NULL;
   old_level = intr_disable();
-  if (!list_empty(&sema->waiters))
-    thread_unblock(list_entry(list_pop_front(&sema->waiters), struct thread, elem));
+  if (sema->heap.size > 0) {
+    thread1 = pop_heap(&sema->heap);
+    thread_unblock(thread1);
+  }
   sema->value++;
+
+  // 实现抢占式
+  if (thread1 != NULL && thread1->priority > t->priority) {
+    if (intr_context()) {
+      intr_yield_on_return();
+    } else {
+      thread_yield();
+    }
+  }
+
   intr_set_level(old_level);
 }
 
@@ -170,12 +189,20 @@ void lock_init(struct lock* lock) {
    interrupts disabled, but interrupts will be turned back on if
    we need to sleep. */
 void lock_acquire(struct lock* lock) {
+  struct thread *t1, *t2;
+  t1 = thread_current();
+  t2 = lock->holder;
   ASSERT(lock != NULL);
   ASSERT(!intr_context());
-  ASSERT(!lock_held_by_current_thread(lock));
-
+  if (lock_held_by_current_thread(lock))
+    exit(1);
+  if (t2 != NULL && t1->priority > t2->priority) {
+    thread_prio_donate(t1, t2, lock);
+  }
   sema_down(&lock->semaphore);
-  lock->holder = thread_current();
+  //printf("%sgot the lock\n",t1->name);
+  lock->holder = t1;
+  t1->donatiee = NULL;
 }
 
 /* Tries to acquires LOCK and returns true if successful or false
@@ -203,10 +230,38 @@ bool lock_try_acquire(struct lock* lock) {
    handler. */
 void lock_release(struct lock* lock) {
   ASSERT(lock != NULL);
-  ASSERT(lock_held_by_current_thread(lock));
-
+  int i = 0;
+  if (!lock_held_by_current_thread(lock))
+    exit(1);
+  struct thread* t = lock->holder;
   lock->holder = NULL;
+  if (t->donated == 1) {
+    struct list_elem* e;
+    struct togive_node* g;
+    for (e = list_begin(&t->togive_list); e != list_end(&t->togive_list); e = list_next(e)) {
+      g = list_entry(e, struct togive_node, elem);
+      if (g->lock == lock) {
+        if (e == list_begin(&t->togive_list)) {
+          t->priority = g->pre_p;
+          i = 1;
+        } else {
+          list_entry(e->prev, struct togive_node, elem)->pre_p = g->pre_p;
+        }
+        list_remove(e);
+        palloc_free_page(g);
+
+        break;
+      }
+    }
+    if (list_empty(&t->togive_list)) {
+      t->priority = t->pre_prio;
+      t->pre_prio = PRI_DEFAULT;
+      t->donated = 0;
+    }
+  }
   sema_up(&lock->semaphore);
+  if (i)
+    thread_yield();
 }
 
 /* Returns true if the current thread holds LOCK, false
@@ -278,7 +333,7 @@ void rw_lock_release(struct rw_lock* rw_lock, bool reader) {
 
 /* One semaphore in a list. */
 struct semaphore_elem {
-  struct list_elem elem;      /* List element. */
+  struct thread* thread;      /* List element. */
   struct semaphore semaphore; /* This semaphore. */
 };
 
@@ -287,8 +342,7 @@ struct semaphore_elem {
    code to receive the signal and act upon it. */
 void cond_init(struct condition* cond) {
   ASSERT(cond != NULL);
-
-  list_init(&cond->waiters);
+  prio_q_init(&cond->cheap, max_prio_compare);
 }
 
 /* Atomically releases LOCK and waits for COND to be signaled by
@@ -313,17 +367,19 @@ void cond_init(struct condition* cond) {
    we need to sleep. */
 void cond_wait(struct condition* cond, struct lock* lock) {
   struct semaphore_elem waiter;
-
+  struct thread* t = thread_current();
   ASSERT(cond != NULL);
   ASSERT(lock != NULL);
   ASSERT(!intr_context());
   ASSERT(lock_held_by_current_thread(lock));
-
+  waiter.thread = t;
   sema_init(&waiter.semaphore, 0);
-  list_push_back(&cond->waiters, &waiter.elem);
+  t->cv = &waiter;
+  heap_insert(&cond->cheap, t);
   lock_release(lock);
   sema_down(&waiter.semaphore);
   lock_acquire(lock);
+  t->cv = NULL;
 }
 
 /* If any threads are waiting on COND (protected by LOCK), then
@@ -338,9 +394,11 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
   ASSERT(lock != NULL);
   ASSERT(!intr_context());
   ASSERT(lock_held_by_current_thread(lock));
-
-  if (!list_empty(&cond->waiters))
-    sema_up(&list_entry(list_pop_front(&cond->waiters), struct semaphore_elem, elem)->semaphore);
+  struct thread* t = NULL;
+  if (cond->cheap.size > 0) {
+    t = pop_heap(&cond->cheap);
+    sema_up(&t->cv->semaphore);
+  }
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -352,7 +410,119 @@ void cond_signal(struct condition* cond, struct lock* lock UNUSED) {
 void cond_broadcast(struct condition* cond, struct lock* lock) {
   ASSERT(cond != NULL);
   ASSERT(lock != NULL);
-
-  while (!list_empty(&cond->waiters))
+  while (cond->cheap.size > 0)
     cond_signal(cond, lock);
+}
+
+int prio_q_init(struct priority_queue* h, int (*compare)(const void*, const void*)) {
+  h->capacity = 8;
+  h->size = 0;
+  h->tickets = 0;
+  /*struct thread** pq;
+  pq=palloc_get_page(PAL_ZERO);
+  if(pq==NULL){
+    printf("could not palloc prio_q");
+    exit(-1);
+  }*/
+  h->prio_q = h->init_q;
+  h->compare = compare;
+  h->prio_q[0] = NULL;
+  return 0;
+}
+int parent(int i) { return i / 2; }
+int left(int i) { return 2 * i; }
+int right(int i) { return 2 * i + 1; }
+int max_prio_compare(const void* a, const void* b) {
+  struct thread *t1, *t2;
+  t1 = (struct thread*)a;
+  t2 = (struct thread*)b;
+  if (t1->priority > t2->priority ||
+      (t1->priority == t2->priority && t1->q_tickets < t2->q_tickets))
+    return 1;
+  else
+    return 0;
+}
+void swap(struct priority_queue* h, int i, int j) {
+  if (h->size < i || h->size < j) {
+    printf("i=%d j=%d size=%d\n", i, j, h->size);
+    exit(-1);
+  }
+  struct thread* temp = h->prio_q[j];
+  h->prio_q[j] = h->prio_q[i];
+  h->prio_q[j]->q_posi = j;
+  h->prio_q[i] = temp;
+  h->prio_q[i]->q_posi = i;
+}
+void heapify(struct priority_queue* h, int i) {
+  int l = 0, r = 0, finish = 0, largest = i;
+  while (!finish) {
+    l = left(i);
+    r = right(i);
+    if (l <= h->size && h->compare(h->prio_q[l], h->prio_q[i]))
+      largest = l;
+    if (r <= h->size && h->compare(h->prio_q[r], h->prio_q[largest]))
+      largest = r;
+    if (largest != i) {
+      swap(h, i, largest);
+      i = largest;
+    } else {
+      finish = 1;
+    }
+  }
+}
+struct thread* pop_heap(struct priority_queue* h) {
+  if (h->size < 1) {
+    return NULL;
+  }
+  struct thread* t;
+  t = h->prio_q[1];
+  t->h = NULL;
+  t->q_tickets = 0;
+  swap(h, 1, h->size);
+  h->prio_q[h->size] = NULL;
+  h->size--;
+  heapify(h, 1);
+  return t;
+}
+void heap_up(struct priority_queue* h, int i) {
+  /*  if(h->prio_q[i]->priiority>prio){
+    printf("cant smaller");
+    exit(-1);
+  }
+  h->prio_q[i]->priiority=prio;*/
+  while (i > 1) {
+    int p = parent(i);
+    if (h->compare(h->prio_q[i], h->prio_q[p])) {
+      swap(h, i, p);
+      i = p;
+    } else
+      break;
+  }
+}
+void heap_down(struct priority_queue* h, int i) { heapify(h, i); }
+
+void heap_insert(struct priority_queue* h, struct thread* t) {
+  h->size++;
+  h->tickets++;
+  if (h->size > h->capacity) {
+    heap_resize(h);
+  }
+  h->prio_q[h->size] = t;
+  t->q_posi = h->size;
+  t->q_tickets = h->tickets;
+  t->h = h;
+  heap_up(h, h->size); //先不管堆满的情况
+}
+void heap_resize(struct priority_queue* h) {
+  h->capacity = h->capacity * 2;
+  struct thread** p;
+  p = palloc_get_page(0);
+  if (!p)
+    exit(-1);
+  for (int i = 0; i < h->size; i++) {
+    p[i] = h->prio_q[i];
+  }
+  if (h->size != 9)
+    palloc_free_page(h->prio_q);
+  h->prio_q = p;
 }

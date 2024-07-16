@@ -7,6 +7,13 @@
 #include "threads/synch.h"
 #include "threads/fixed-point.h"
 
+#include <stddef.h>
+#define container_of(ptr, type, member)                                                            \
+  ({                                                                                               \
+    const typeof(((type*)0)->member)* __mptr = (ptr);                                              \
+    (type*)((char*)__mptr - offsetof(type, member));                                               \
+  })
+
 /* States in a thread's life cycle. */
 enum thread_status {
   THREAD_RUNNING, /* Running thread. */
@@ -93,6 +100,29 @@ struct thread {
   /* Shared between thread.c and synch.c. */
   struct list_elem elem; /* List element. */
 
+  int k_fpu_inited;
+  int u_fpu_inited;
+
+  int wake_ticks;
+
+  int q_posi;
+  int q_tickets;
+  struct priority_queue* h;  /*in which heap*/
+  struct semaphore_elem* cv; /*condition varible elem*/
+
+  int donated; /*prio_doante*/
+  //struct lock*togive_lock;
+  int pre_prio;
+  struct list togive_list;
+  struct thread* donatiee;
+
+  int vrtime; /*CFS*/
+
+  struct pt_node* pt_node; /*pthread node*/
+
+  int upage;
+  void* kpage;
+
 #ifdef USERPROG
   /* Owned by process.c. */
   struct process* pcb; /* Process control block if this thread is a userprog */
@@ -100,6 +130,26 @@ struct thread {
 
   /* Owned by thread.c. */
   unsigned magic; /* Detects stack overflow. */
+};
+
+struct togive_node {
+  struct lock* lock;
+  int pre_p;
+  struct list_elem elem;
+};
+extern struct list all_list;
+
+struct priority_table {
+  struct list prio_table[64];
+  int max_prio;
+};
+
+struct pt_node {
+  int tid;
+  int exited;
+  struct thread* thread;
+  struct semaphore* joined_sema;
+  struct list_elem elem;
 };
 
 /* Types of scheduler that the user can request the kernel
@@ -143,6 +193,9 @@ void thread_foreach(thread_action_func*, void*);
 
 int thread_get_priority(void);
 void thread_set_priority(int);
+void thread_prio_donate(struct thread* t1, struct thread* t2, struct lock* lock);
+
+void insert_pt_node(struct thread*);
 
 int thread_get_nice(void);
 void thread_set_nice(int);
