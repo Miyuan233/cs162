@@ -61,6 +61,7 @@ void test_main(void) {
     /* Descend into directory. */
     CHECK(chdir(dir_name), "chdir \"%s\"", dir_name);
   }
+
   CHECK(i > 200, "created files and directories only to level %d", i);
   quiet = false;
 
@@ -68,7 +69,7 @@ void test_main(void) {
   quiet = true;
   while (i-- > 10) {
     char file_name[16], dir_name[16];
-
+    practice(i);
     snprintf(file_name, sizeof file_name, "file%d", i);
     snprintf(dir_name, sizeof dir_name, "dir%d", i);
     CHECK(chdir(".."), "chdir \"..\"");

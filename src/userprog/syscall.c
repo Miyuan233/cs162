@@ -15,7 +15,7 @@ typedef char lock_t;
 typedef char sema_t;
 
 #define MAX_FILE 128
-
+#define BITMAP_ERROR SIZE_MAX
 static void syscall_handler(struct intr_frame*);
 
 void syscall_init(void) { intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall"); }
@@ -163,6 +163,21 @@ static void syscall_handler(struct intr_frame* f UNUSED) {
     case SYS_LOCK_RELEASE:
       f->eax = ulock_release((lock_t*)args[1]);
       break;
+    case SYS_CHDIR:
+      f->eax = chdir((char*)args[1]);
+      break;
+    case SYS_MKDIR:
+      f->eax = mkdir((char*)args[1]);
+      break;
+    case SYS_ISDIR:
+      f->eax = isdir((int)args[1]);
+      break;
+    case SYS_INUMBER:
+      f->eax = inumber((int)args[1]);
+      break;
+    case SYS_READDIR:
+      f->eax = readdir((int)args[1], (char*)args[2]);
+      break;
 
     defalut:
       printf("%s: no such syscall. exit(-1)\n", thread_current()->pcb->process_name);
@@ -188,7 +203,11 @@ pid_t exec(const char* cmd_line) {
 
 /*A “fake” syscall designed to get you familiar with the syscall interface This
       syscall increments the passed in integer argument by 1 and returns it to the user.*/
-int practice(int i) { return (i + 1); }
+int practice(int i) {
+  check_inode();
+
+  return (i + 1);
+}
 
 /*
     Terminates Pintos by calling the shutdown_power_off function in devices/shutdown.h.
@@ -232,6 +251,7 @@ int create(const char* file, unsigned initial_size) {
   if (file > 0xc0000000)
     return -1;
   a = filesys_create(file, (off_t)initial_size);
+  //if(!a)printf("could not create %s\n",file);
   return a;
 }
 
@@ -241,6 +261,7 @@ int create(const char* file, unsigned initial_size) {
     file does not close it. See this section of the FAQ for more details.*/
 int remove(const char* file) {
   //lock_acquire(&filesys_lock);
+  //printf("remove %s \n",file);
   if (file == NULL || (uint8_t*)file > (uint8_t*)0xc0000000) {
     return 0;
   }
@@ -269,10 +290,10 @@ int remove(const char* file) {
 int open(const char* file) {
   lock_acquire(&filesys_lock);
   int fd, new_fd, running = 0;
-  struct file* f;
+  struct file_info* f;
   struct list_elem* e = NULL;
   struct thread *t = thread_current(), *t1;
-  if (file == NULL || (uint8_t*)file >= (uint8_t*)0xc0000000) {
+  if (file == NULL || (strlen(file) == 0) || (uint8_t*)file >= (uint8_t*)0xc0000000) {
     lock_release(&filesys_lock);
     return -1;
   }
@@ -289,7 +310,7 @@ int open(const char* file) {
     }
   }
   if (running)
-    file_deny_write(f);
+    file_deny_write(f->fp);
 
   fd = t->pcb->fd_table.new_fd;
   t->pcb->fd_table.fd_node[fd].open = 1;
@@ -308,12 +329,21 @@ int open(const char* file) {
     Returns the size, in bytes, of the open file with file descriptor fd. Returns -1 if 
     fd does not correspond to an entry in the file descriptor table.*/
 int filesize(int fd) {
-  struct file* f;
+  int length = 0;
+  struct inode* inode;
+  struct file_info* p;
   struct thread* t = thread_current();
-  f = t->pcb->fd_table.fd_node[fd].file;
-  if (t->pcb->fd_table.fd_node[fd].open == 0 || f == NULL)
+  p = t->pcb->fd_table.fd_node[fd].file;
+  if (t->pcb->fd_table.fd_node[fd].open == 0 || p == NULL)
     return -1;
-  int length = file_length(f);
+  if (p->is_dir) {
+    struct dir* d = p->fp;
+    length = d->inode->data.length;
+  } else {
+    struct file* f = p->fp;
+    length = f->inode->data.length;
+  }
+
   return length;
 }
 
@@ -329,7 +359,12 @@ void close(int fd) {
     exit(-1);
   }
   t->pcb->fd_table.fd_node[fd].open = 0;
-  file_close(t->pcb->fd_table.fd_node[fd].file);
+  struct file_info* p = t->pcb->fd_table.fd_node[fd].file;
+  if (p->is_dir)
+    dir_close(p->fp);
+  else
+    file_close(p->fp);
+  free(p);
   //printf("now we close %d\n",fd);
   if (fd < t->pcb->fd_table.new_fd)
     t->pcb->fd_table.new_fd = fd;
@@ -344,7 +379,7 @@ void close(int fd) {
     function in devices/input.c.*/
 int read(int fd, void* buffer, unsigned size) {
   int read1;
-  struct file* f;
+  struct file_info* p;
   struct thread* t = thread_current();
   //printf("now we read%d\n",fd);
 
@@ -354,13 +389,13 @@ int read(int fd, void* buffer, unsigned size) {
     //printf("wrong input\n");没有处理stdin
     return -1;
   }
-  f = t->pcb->fd_table.fd_node[fd].file;
-  if (t->pcb->fd_table.fd_node[fd].open == 0 || f == NULL) {
-    //printf("error file\n");
+  p = t->pcb->fd_table.fd_node[fd].file;
+
+  if (t->pcb->fd_table.fd_node[fd].open == 0 || p == NULL || p->is_dir) {
     return -1;
   }
   lock_acquire(&filesys_lock);
-  read1 = file_read(f, buffer, size);
+  read1 = file_read(p->fp, buffer, size);
   lock_release(&filesys_lock);
   //if(read1==-1)printf("rerror read\n");
   //printf("read= %d\n",read1);
@@ -376,7 +411,7 @@ int write(int fd, const void* buffer, unsigned size) {
       a = strlen(s);
   } else {
 
-    struct file* f;
+    struct file_info* p;
     struct thread* t = thread_current();
     if (size == 0)
       return 0;
@@ -384,17 +419,18 @@ int write(int fd, const void* buffer, unsigned size) {
 
       return -1;
     }
-    f = t->pcb->fd_table.fd_node[fd].file;
 
-    if (t->pcb->fd_table.fd_node[fd].open == 0 || f == NULL) {
+    p = t->pcb->fd_table.fd_node[fd].file;
 
+    if (t->pcb->fd_table.fd_node[fd].open == 0 || p == NULL || p->is_dir) {
       return -1;
     }
+
     lock_acquire(&filesys_lock);
-    a = file_write(f, buffer, size);
+    a = file_write(p->fp, buffer, size);
     lock_release(&filesys_lock);
   }
-
+  //if(a!=size)printf("could not write\n");
   return a;
 }
 /*Returns the position of the next byte to be read or written in open file fd, 
@@ -402,17 +438,17 @@ int write(int fd, const void* buffer, unsigned size) {
     it can either exit with -1 or it can just fail silently.*/
 int tell(int fd) {
   int tell1;
-  struct file* f;
+  struct file_info* p;
   struct thread* t = thread_current();
   if (fd < 0 || fd >= MAX_FILE) {
     return -1;
   }
-  f = t->pcb->fd_table.fd_node[fd].file;
+  p = t->pcb->fd_table.fd_node[fd].file;
   if (t->pcb->fd_table.fd_node[fd].open == 0) {
     printf(" file did not open\n");
     return -1;
   }
-  tell1 = file_tell(f);
+  tell1 = file_tell(p->fp);
   return tell1;
 }
 
@@ -430,18 +466,18 @@ int tell(int fd) {
     any special effort in the syscall implementation.*/
 void seek(int fd, unsigned position) {
 
-  struct file* f;
+  struct file_info* p;
   struct thread* t = thread_current();
-  if (fd < 0 || fd >= MAX_FILE || position < 0 || filesize(fd) < position) {
+  if (fd < 0 || fd >= MAX_FILE || position < 0) {
     return;
   }
-  f = t->pcb->fd_table.fd_node[fd].file;
+  p = t->pcb->fd_table.fd_node[fd].file;
   if (t->pcb->fd_table.fd_node[fd].open == 0) {
     printf(" file did not open\n");
     return;
   }
 
-  file_seek(f, position);
+  file_seek(p->fp, position);
 }
 /*
     This is similar to the practice syscall in that it’s a “fake” system 
@@ -624,3 +660,151 @@ int usema_up(sema_t* sema) {
 }
 
 tid_t get_tid(void) { return thread_tid(); }
+
+/*
+Changes the current working directory of the process to dir, 
+which may be relative or absolute. Returns true if successful, 
+false on failure.*/
+
+int chdir(const char* dir) {
+  //printf("change to  %s\n", dir);
+  bool success = 1;
+  struct dir* dir1 = NULL;
+  struct inode* inode = NULL;
+  char name[NAME_MAX + 1];
+  block_sector_t a = ROOT_DIR_SECTOR;
+
+  if (dir[0] != '/') {
+    a = thread_current()->pcb->cur_dir;
+    if (a == 0)
+      a = ROOT_DIR_SECTOR;
+  }
+
+  inode = inode_open(a);
+
+  while (success) {
+    if (get_next_part(name, &dir) == 0)
+      break;
+    dir1 = dir_open(inode);
+    success = dir_lookup(dir1, name, &inode);
+    dir_close(dir1);
+  }
+  if (success) {
+    thread_current()->pcb->cur_dir = inode->sector;
+    inode_close(inode);
+  }
+  //else{printf("coule not change to %s\n", name);}
+  return success;
+}
+
+/*
+Creates the directory named dir, which may be relative or absolute. 
+Returns true if successful, false on failure. Fails if dir already 
+exists or if any directory name in dir, besides the last, does not 
+already exist. That is, mkdir("/a/b/c") succeeds only if /a/b already 
+exists and /a/b/c does not.*/
+int mkdir(const char* name) {
+  //printf(" create dir%s \n",name);
+  bool find = 1;
+  struct dir* dir1 = NULL;
+  struct inode* inode = NULL;
+  char name_part[NAME_MAX + 1];
+  block_sector_t sector_of_the_pdir = 0;
+  block_sector_t a = ROOT_DIR_SECTOR;
+
+  if (name[0] != '/') {
+    a = thread_current()->pcb->cur_dir;
+    if (a == 0)
+      a = ROOT_DIR_SECTOR;
+  }
+
+  inode = inode_open(a);
+
+  while (find) {
+    if (get_next_part(name_part, &name) == 0)
+      break;
+    dir1 = dir_open(inode);
+    find = dir_lookup(dir1, name_part, &inode);
+    sector_of_the_pdir = inode->sector;
+    dir_close(dir1);
+  }
+  if (find || name[0] != '\0')
+    return false;
+
+  /*创建目录并将目录项添加到父目录*/
+  block_sector_t inode_sector = 0;
+
+  free_map_allocate(1, &inode_sector);
+  if (!inode_sector)
+    return false;
+  if (!inode_create(inode_sector, 0, 1)) {
+    free_map_release(inode_sector, 1);
+    return false;
+  }
+
+  struct dir* pdir = dir_open(inode_open(sector_of_the_pdir));
+  dir_add(pdir, name_part, inode_sector, 1);
+  dir_close(pdir);
+
+  /*初始化自身目录项*/
+  struct dir* cdir = dir_open(inode_open(inode_sector));
+  dir_add(cdir, ".", inode_sector, 1);
+  dir_add(cdir, "..", sector_of_the_pdir, 1);
+  dir_close(cdir);
+
+  return true;
+}
+/*
+
+Reads a directory entry from file descriptor fd, which must represent 
+a directory. If successful, stores the null-terminated file name in 
+name, which must have room for READDIR_MAX_LEN + 1 bytes, and returns 
+true. If no entries are left in the directory, returns false.
+. and .. should not be returned by readdir
+If the directory changes while it is open, then it is acceptable 
+for some entries not to be read at all or to be read multiple times. 
+Otherwise, each directory entry should be read once, in any order.
+READDIR_MAX_LEN is defined in lib/user/syscall.h. If your file 
+system supports longer file names than the basic file system, you 
+should increase this value from the default of 14.*/
+int readdir(int fd, char* name) {
+  if (!isdir(fd))
+    return false;
+  struct dir* dir1 = thread_current()->pcb->fd_table.fd_node[fd].file->fp;
+  if (!dir1)
+    return false;
+  return dir_readdir(dir1, name);
+}
+
+/*
+Returns true if fd represents a directory, false if it represents an ordinary file.*/
+int isdir(int fd) { return thread_current()->pcb->fd_table.fd_node[fd].file->is_dir; }
+
+/*
+Returns the inode number of the inode associated with fd, which
+ may represent an ordinary file or a directory.
+An inode number persistently identifies a file or directory. It 
+is unique during the file’s existence. In Pintos, the sector 
+number of the inode is suitable for use as an inode number.
+
+We have provided the ls and mkdir user programs, which are 
+straightforward once the above syscalls are implemented. 
+We have also provided pwd, which is not so straightforward. 
+The shell program implements cd internally.
+
+The pintos extract and pintos append commands should now accept 
+full path names, assuming that the directories used in the paths 
+have already been created. This should not require any significant 
+extra effort on your part.
+
+*/
+int inumber(int fd) {
+  void* p = thread_current()->pcb->fd_table.fd_node[fd].file->fp;
+  if (isdir(fd)) {
+    struct dir* d = p;
+    return d->inode->sector;
+  } else {
+    struct file* f = p;
+    return f->inode->sector;
+  }
+}

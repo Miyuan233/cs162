@@ -101,15 +101,17 @@ void fsutil_extract(char** argv UNUSED) {
       printf("ignoring directory %s\n", file_name);
     else if (type == USTAR_REGULAR) {
       struct file* dst;
-
+      struct file_info* p;
       printf("Putting '%s' into the file system...\n", file_name);
 
       /* Create destination file. */
       if (!filesys_create(file_name, size))
         PANIC("%s: create failed", file_name);
-      dst = filesys_open(file_name);
-      if (dst == NULL)
+      p = filesys_open(file_name);
+      if (p == NULL)
         PANIC("%s: open failed", file_name);
+      dst = (struct file*)p->fp;
+      //free(p);
 
       /* Do copy. */
       while (size > 0) {
@@ -151,7 +153,9 @@ void fsutil_append(char** argv) {
 
   const char* file_name = argv[1];
   void* buffer;
+  struct file_info* p;
   struct file* src;
+
   struct block* dst;
   off_t size;
 
@@ -163,9 +167,11 @@ void fsutil_append(char** argv) {
     PANIC("couldn't allocate buffer");
 
   /* Open source file. */
-  src = filesys_open(file_name);
-  if (src == NULL)
+  p = filesys_open(file_name);
+  if (p == NULL)
     PANIC("%s: open failed", file_name);
+  src = p->fp;
+  free(p);
   size = file_length(src);
 
   /* Open target block device. */
@@ -180,6 +186,7 @@ void fsutil_append(char** argv) {
 
   /* Do copy. */
   while (size > 0) {
+    //printf("size is %d\n",size);
     int chunk_size = size > BLOCK_SECTOR_SIZE ? BLOCK_SECTOR_SIZE : size;
     if (sector >= block_size(dst))
       PANIC("%s: out of space on scratch device", file_name);

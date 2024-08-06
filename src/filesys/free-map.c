@@ -27,7 +27,9 @@ bool free_map_allocate(size_t cnt, block_sector_t* sectorp) {
   if (sector != BITMAP_ERROR && free_map_file != NULL && !bitmap_write(free_map, free_map_file)) {
     bitmap_set_multiple(free_map, sector, cnt, false);
     sector = BITMAP_ERROR;
+    printf("alloc false\n");
   }
+
   if (sector != BITMAP_ERROR)
     *sectorp = sector;
   return sector != BITMAP_ERROR;
@@ -50,13 +52,18 @@ void free_map_open(void) {
 }
 
 /* Writes the free map to disk and closes the free map file. */
-void free_map_close(void) { file_close(free_map_file); }
+void free_map_close(void) {
+  filesys_create("\pa", 0);
+  filesys_create("\fs.tar", 0);
+  block_write(fs_device, 0, &free_map_file->inode->data);
+  file_close(free_map_file);
+}
 
 /* Creates a new free map file on disk and writes the free map to
    it. */
 void free_map_create(void) {
   /* Create inode. */
-  if (!inode_create(FREE_MAP_SECTOR, bitmap_file_size(free_map)))
+  if (!inode_create(FREE_MAP_SECTOR, bitmap_file_size(free_map), 0))
     PANIC("free map creation failed");
 
   /* Write bitmap to file. */
@@ -64,5 +71,5 @@ void free_map_create(void) {
   if (free_map_file == NULL)
     PANIC("can't open free map");
   if (!bitmap_write(free_map, free_map_file))
-    PANIC("can't write free map");
+    PANIC("can't write free map %d", bitmap_file_size(free_map));
 }

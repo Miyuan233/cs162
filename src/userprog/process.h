@@ -24,7 +24,7 @@ typedef void (*stub_fun)(pthread_fun, void*);
 
 struct fd_node {
   int open;
-  struct file* file;
+  struct file_info* file;
 };
 struct fd_table {
   struct fd_node fd_node[MAX_FILE];
@@ -53,6 +53,8 @@ struct process {
 
   struct list user_sema;
   struct list user_lock;
+
+  block_sector_t cur_dir;
 };
 
 struct child_node {

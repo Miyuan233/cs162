@@ -100,13 +100,15 @@ pid_t process_execute(const char* file_name) {
   }
   args->fn_copy = fn_copy;
 
-  struct file* file = NULL;
+  struct file_info* file = NULL;
   lock_acquire(&filesys_lock);
   file = filesys_open(args->argv[0]);
   if (file == NULL) {
     printf("load: %s: open failed\n", args->argv[0]);
-  } else
-    file_close(file);
+  } else {
+    file_close((struct file*)file->fp);
+    free(file);
+  }
   lock_release(&filesys_lock);
   if (file == NULL) {
     palloc_free_page(fn_copy);
@@ -188,6 +190,7 @@ static void start_process(void* args) {
     list_init(&new_pcb->pthread_list);
     list_init(&new_pcb->user_sema);
     list_init(&new_pcb->user_lock);
+    new_pcb->cur_dir = 1;
     t->pcb = new_pcb;
     insert_pt_node(t);
 
@@ -404,8 +407,14 @@ void process_exit(void) {
   struct process* pcb_to_free = cur->pcb;
   cur->pcb = NULL;
   for (int i = 3; i < pcb_to_free->fd_table.new_fd; i++) {
-    if (pcb_to_free->fd_table.fd_node[i].open != 0)
-      file_close(pcb_to_free->fd_table.fd_node[i].file);
+    if (pcb_to_free->fd_table.fd_node[i].open != 0) {
+      struct file_info* p = pcb_to_free->fd_table.fd_node[i].file;
+      if (p->is_dir)
+        dir_close(p->fp);
+      else
+        file_close(p->fp);
+      free(p);
+    }
   }
   /*struct list* l1 = &thread_current()->child_list;
   struct list_elem* e;
@@ -528,6 +537,7 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   struct thread* t = thread_current();
   struct Elf32_Ehdr ehdr;
   struct file* file = NULL;
+  struct file_info* p = NULL;
   off_t file_ofs;
   bool success = false;
   int i;
@@ -541,12 +551,14 @@ bool load(const char* file_name, void (**eip)(void), void** esp) {
   process_activate();
 
   /* Open executable file. */
-  file = filesys_open(file_name);
+  p = filesys_open(file_name);
 
-  if (file == NULL) {
+  if (p == NULL) {
     printf("load: %s: open failed\n", file_name);
     return 0;
   }
+  file = p->fp;
+  free(p);
 
   /* Read and verify executable header. */
   if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
